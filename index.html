@@ -372,6 +372,12 @@
   }
   .admin-header-cell{font-size:11px;text-transform:uppercase;color:var(--text-secondary);font-weight:700;letter-spacing:.4px;}
   .admin-saved-flash{color:var(--ok);font-size:11px;}
+  .admin-readonly{padding:6px 2px;font-size:13px;color:var(--text-primary);font-family:'SF Mono','IBM Plex Mono',Menlo,Consolas,monospace;}
+  .admin-empty{color:var(--text-secondary);font-style:italic;font-family:var(--font-body);}
+  .admin-row-actions{display:flex;align-items:center;gap:6px;}
+  .icon-btn-danger{background:transparent;color:var(--warn);}
+  .icon-btn-danger:hover{background:rgba(184,39,47,.12);}
+  .admin-whoami{font-size:12px;color:var(--text-secondary);}
   #declContainer .docx-wrapper{
     background:transparent !important; padding:0 !important;
   }
@@ -524,9 +530,12 @@
     <div id="adminPanel" class="card" style="display:none;">
       <div class="admin-panel-header">
         <h2 style="margin:0;">Administración de códigos de transporte</h2>
-        <button class="btn btn-ghost btn-sm" id="btnAdminLogout">Cerrar sesión</button>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <span class="admin-whoami" id="adminWhoami"></span>
+          <button class="btn btn-ghost btn-sm" id="btnAdminLogout">Cerrar sesión</button>
+        </div>
       </div>
-      <p class="admin-sub">Los cambios se ven de inmediato para todas las personas que usan la herramienta, sin tocar el HTML.</p>
+      <p class="admin-sub">Los cambios se ven de inmediato para todas las personas que usan la herramienta, sin tocar el HTML. Usa el lápiz para editar un código, el disquete para guardar, y la ✕ para restablecer al valor de respaldo.</p>
 
       <div class="codes-status-bar" style="margin-bottom:18px;">
         <span class="codes-dot" id="codesDotAdmin"></span>
@@ -1796,11 +1805,16 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
     });
   }
 
+  var editingCodeRows = {};
+
   function renderAdminGrid(){
     var textEl = el("codesStatusTextAdmin");
     var dotEl = el("codesDotAdmin");
     if(textEl) textEl.textContent = el("codesStatusText") ? el("codesStatusText").textContent : "";
     if(dotEl) dotEl.className = "codes-dot " + codesSource;
+
+    var whoEl = el("adminWhoami");
+    if(whoEl && fbAuth && fbAuth.currentUser) whoEl.textContent = "Conectado como " + fbAuth.currentUser.email;
 
     var seedBlock = el("seedBlock");
     if(seedBlock) seedBlock.style.display = (codesSource === "fallback" && Object.keys(liveCodeTable).length === 0) ? "block" : "none";
@@ -1816,40 +1830,76 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
       "<div></div></div>";
     ADMIN_AGENCIAS.forEach(function(aKey){
       ADMIN_TRANSPORTISTAS.forEach(function(tKey){
-        var entry = table[aKey + "|" + tKey] || ["", null];
+        var key = aKey + "|" + tKey;
+        var entry = table[key] || ["", null];
         var codigo = entry[0] || "";
         var vencimiento = entry[1] || "";
+        var isEditing = !!editingCodeRows[key];
+
+        var codigoCell, vencCell;
+        if(isEditing){
+          codigoCell = "<input data-field='codigo' value='" + escapeHtml(codigo) + "' placeholder='Ej: CS 12/2023 o SUSPENDIDA'>";
+          vencCell = "<input data-field='vencimiento' type='date' value='" + escapeHtml(vencimiento) + "'>";
+        } else {
+          codigoCell = "<div class='admin-readonly'>" + (codigo ? escapeHtml(codigo) : "<span class='admin-empty'>— sin código —</span>") + "</div>";
+          vencCell = "<div class='admin-readonly'>" + (vencimiento ? escapeHtml(vencimiento) : "<span class='admin-empty'>no vence</span>") + "</div>";
+        }
+
+        var actions = isEditing
+          ? "<button class='icon-btn icon-btn-save' data-action='save' data-key='" + key + "' title='Guardar cambios'>" + ICON_SAVE + "</button>"
+          : "<button class='icon-btn' data-action='edit' data-key='" + key + "' title='Editar este código'>" + ICON_PENCIL + "</button>" +
+            "<button class='icon-btn icon-btn-danger' data-action='delete' data-key='" + key + "' title='Restablecer al valor de respaldo'>✕</button>";
+
         html += "<div class='admin-row' data-akey='" + aKey + "' data-tkey='" + tKey + "'>" +
           "<div>" + escapeHtml(AGENCIA_ALIASES[aKey]) + "</div>" +
           "<div>" + escapeHtml(TRANSPORTISTA_ALIASES[tKey]) + "</div>" +
-          "<input data-field='codigo' value='" + escapeHtml(codigo) + "' placeholder='Ej: CS 12/2023 o SUSPENDIDA'>" +
-          "<input data-field='vencimiento' type='date' value='" + escapeHtml(vencimiento) + "'>" +
-          "<span class='admin-saved-flash' data-flash></span>" +
+          codigoCell + vencCell +
+          "<span class='admin-row-actions'>" + actions + "<span class='admin-saved-flash' data-flash></span></span>" +
           "</div>";
       });
     });
     grid.innerHTML = html;
 
-    grid.querySelectorAll(".admin-row input").forEach(function(inp){
-      inp.addEventListener("change", function(){
-        var row = inp.closest(".admin-row");
+    grid.querySelectorAll("button[data-action]").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var key = btn.getAttribute("data-key");
+        var action = btn.getAttribute("data-action");
+        var row = btn.closest(".admin-row");
         var aKey = row.getAttribute("data-akey");
         var tKey = row.getAttribute("data-tkey");
-        var codigoVal = row.querySelector("[data-field='codigo']").value.trim();
-        var vencVal = row.querySelector("[data-field='vencimiento']").value || null;
-        var flash = row.querySelector("[data-flash]");
-        fbDb.collection("codigos_transporte").doc(aKey + "_" + tKey).set({
-          agenciaKey: aKey,
-          transportistaKey: tKey,
-          agenciaNombre: AGENCIA_ALIASES[aKey],
-          transportistaNombre: TRANSPORTISTA_ALIASES[tKey],
-          codigo: codigoVal,
-          vencimiento: vencVal
-        }).then(function(){
-          if(flash){ flash.textContent = "Guardado ✓"; setTimeout(function(){ flash.textContent = ""; }, 2000); }
-        }).catch(function(err){
-          alert("Error al guardar: " + err.message);
-        });
+
+        if(action === "edit"){
+          editingCodeRows[key] = true;
+          renderAdminGrid();
+          return;
+        }
+
+        if(action === "save"){
+          var codigoVal = row.querySelector("[data-field='codigo']").value.trim();
+          var vencVal = row.querySelector("[data-field='vencimiento']").value || null;
+          if(!codigoVal){ alert("El código no puede quedar vacío. Usa el botón ✕ si quieres restablecerlo al valor de respaldo."); return; }
+          fbDb.collection("codigos_transporte").doc(aKey + "_" + tKey).set({
+            agenciaKey: aKey, transportistaKey: tKey,
+            agenciaNombre: AGENCIA_ALIASES[aKey], transportistaNombre: TRANSPORTISTA_ALIASES[tKey],
+            codigo: codigoVal, vencimiento: vencVal
+          }).then(function(){
+            delete editingCodeRows[key];
+            renderAdminGrid();
+          }).catch(function(err){
+            alert("Error al guardar: " + err.message);
+          });
+          return;
+        }
+
+        if(action === "delete"){
+          if(!confirm("¿Quitar el valor guardado para " + AGENCIA_ALIASES[aKey] + " + " + TRANSPORTISTA_ALIASES[tKey] + "? Volverá a usar el valor de respaldo incrustado en la herramienta.")) return;
+          fbDb.collection("codigos_transporte").doc(aKey + "_" + tKey).delete().then(function(){
+            renderAdminGrid();
+          }).catch(function(err){
+            alert("Error al borrar: " + err.message);
+          });
+          return;
+        }
       });
     });
   }
