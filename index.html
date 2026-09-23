@@ -7,6 +7,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<!-- Firebase (SDK compat, mismo proyecto que la calculadora de taras) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
   :root{
     --brand-blue:#003a70;
@@ -336,6 +340,38 @@
   .summary-item{display:flex;flex-direction:column;gap:2px;}
   .summary-lbl{font-size:11px;color:var(--text-muted);font-weight:600;letter-spacing:.01em;}
   .summary-val{font-size:14px;color:var(--text);font-weight:500;}
+
+  /* ---------- Estado de códigos (Firestore en vivo / respaldo) ---------- */
+  .codes-status-bar{
+    display:flex;align-items:center;gap:8px;padding:8px 28px;font-size:12.5px;color:var(--text-secondary);
+    background:var(--surface-alt);border-bottom:1px solid var(--line);
+  }
+  .codes-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--brand-gray-light);}
+  .codes-dot.live{background:var(--ok);}
+  .codes-dot.fallback{background:var(--ochre);}
+  .codes-dot.error{background:var(--warn);}
+
+  /* ---------- Panel de administración ---------- */
+  .admin-back{max-width:1080px;margin:16px auto 0;padding:0 20px;}
+  .admin-sub{font-size:13px;color:var(--text-secondary);margin:4px 0 16px;}
+  .admin-error{color:var(--warn);font-size:13px;margin-top:10px;min-height:1em;}
+  .admin-panel-header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:4px;}
+  .table-scroll{overflow-x:auto;}
+  .admin-row{
+    display:grid;grid-template-columns:1.4fr 1.6fr 1fr 1fr auto;gap:10px;align-items:center;
+    padding:9px 0;border-bottom:1px solid var(--line);font-size:13px;min-width:640px;
+  }
+  .admin-row input{
+    padding:7px 9px;font-size:13px;border:1px solid var(--line-strong);border-radius:8px;
+    background:var(--input-bg);color:var(--text-primary);font-family:inherit;
+  }
+  .admin-row input:focus{outline:none;border-color:var(--salmon);}
+  .admin-header-row{
+    display:grid;grid-template-columns:1.4fr 1.6fr 1fr 1fr auto;gap:10px;min-width:640px;
+    padding-bottom:8px;border-bottom:2px solid var(--line-strong);
+  }
+  .admin-header-cell{font-size:11px;text-transform:uppercase;color:var(--text-secondary);font-weight:700;letter-spacing:.4px;}
+  .admin-saved-flash{color:var(--ok);font-size:11px;}
   #declContainer .docx-wrapper{
     background:transparent !important; padding:0 !important;
   }
@@ -368,9 +404,15 @@
   </div>
   <div class="topbar-right">
     <span class="tag">Herramienta interna · Multi X S.A.</span>
+    <button class="theme-toggle" id="btn-admin-toggle" title="Administración de códigos">⚙</button>
     <button class="theme-toggle" id="btn-theme-toggle" title="Cambiar tema">🌙</button>
     <button class="btn btn-ghost btn-sm" id="btnStartOver" style="display:none;">Reemplazar archivo de este día</button>
   </div>
+</div>
+
+<div class="codes-status-bar no-print" id="codesStatusBar">
+  <span class="codes-dot fallback" id="codesDot"></span>
+  <span id="codesStatusText">Conectando…</span>
 </div>
 
 <div class="day-tabs no-print" id="dayTabs">
@@ -461,6 +503,44 @@
         <tbody id="logBody"></tbody>
       </table>
       <div class="empty-state" id="logEmpty" style="display:none;">Aún no se ha generado ninguna declaración en esta sesión.</div>
+    </div>
+  </section>
+
+  <!-- SCREEN: Admin de códigos de transporte -->
+  <section id="screenAdmin" class="screen">
+    <div class="admin-back no-print">
+      <button class="btn btn-ghost btn-sm" id="btnAdminBack">&larr; Volver</button>
+    </div>
+
+    <div id="adminLogin" class="card" style="max-width:420px;margin:20px auto;">
+      <h2 style="margin-top:0;">Iniciar sesión de administrador</h2>
+      <p class="admin-sub">Solo para actualizar los códigos de transporte. La emisión de declaraciones no requiere iniciar sesión.</p>
+      <div class="field"><label>Correo</label><input type="email" id="adminEmail"></div>
+      <div class="field"><label>Contraseña</label><input type="password" id="adminPassword"></div>
+      <button class="btn btn-accent" id="btnAdminLogin">Ingresar</button>
+      <p class="admin-error" id="adminLoginError"></p>
+    </div>
+
+    <div id="adminPanel" class="card" style="display:none;">
+      <div class="admin-panel-header">
+        <h2 style="margin:0;">Administración de códigos de transporte</h2>
+        <button class="btn btn-ghost btn-sm" id="btnAdminLogout">Cerrar sesión</button>
+      </div>
+      <p class="admin-sub">Los cambios se ven de inmediato para todas las personas que usan la herramienta, sin tocar el HTML.</p>
+
+      <div class="codes-status-bar" style="margin-bottom:18px;">
+        <span class="codes-dot" id="codesDotAdmin"></span>
+        <span id="codesStatusTextAdmin"></span>
+      </div>
+
+      <div id="seedBlock" style="display:none;margin-bottom:18px;">
+        <p class="admin-sub">Firestore aún no tiene datos guardados.</p>
+        <button class="btn btn-accent" id="btnSeedCodes">Importar las 20 combinaciones actuales como punto de partida</button>
+      </div>
+
+      <div class="table-scroll">
+        <div id="adminGrid"></div>
+      </div>
     </div>
   </section>
 
@@ -569,6 +649,26 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
     });
   }
 
+  // ---------- Firebase (mismo proyecto que la calculadora de taras) ----------
+  var firebaseConfig = {
+    apiKey: "AIzaSyCz_oLlpp2p2q0bxxo8L-NMNYLM1DlW1Lk",
+    authDomain: "calculadora-de-taras.firebaseapp.com",
+    projectId: "calculadora-de-taras",
+    storageBucket: "calculadora-de-taras.firebasestorage.app",
+    messagingSenderId: "411079786539",
+    appId: "1:411079786539:web:3a8faa4be32bcecb98aa6e",
+    measurementId: "G-259RML91CM"
+  };
+  var fbAuth = null, fbDb = null, fbReady = false;
+  try{
+    firebase.initializeApp(firebaseConfig);
+    fbAuth = firebase.auth();
+    fbDb = firebase.firestore();
+    fbReady = true;
+  }catch(err){
+    console.error("No se pudo inicializar Firebase:", err);
+  }
+
   // ---------- State ----------
   var shipments = [];      // parsed rows del día activo
   var dispatchLog = [];    // envíos despachados del día activo
@@ -651,7 +751,9 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
     "labbe": "TRANSPORTES LABBE"
   };
   // valor: [código, fecha de vencimiento AAAA-MM-DD o null si no vence / está suspendido]
-  var CODE_TABLE = {
+  // Esta tabla es el RESPALDO local — se usa si Firestore no responde o aún no tiene el dato.
+  // La fuente "viva" (editable desde Administración) vive en Firestore, colección codigos_transporte.
+  var FALLBACK_CODE_TABLE = {
     "cargonet|labbe": ["CS 12/2023", null],
     "cargonet|maryun": ["CS 13/2023", null],
     "cargonet|vasquez": ["CS 14/2023", null],
@@ -673,6 +775,62 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
     "andes|berger": ["CS 85/2025", "2027-05-05"],
     "andes|gla": ["CS 86/2025", "2027-05-05"]
   };
+
+  // Tabla "viva": se llena desde Firestore y se combina sobre el respaldo (Firestore manda cuando hay dato).
+  var liveCodeTable = {};
+  var codesSource = "fallback"; // "fallback" | "live" | "error"
+
+  function effectiveCodeTable(){
+    var merged = {};
+    for(var k1 in FALLBACK_CODE_TABLE){ merged[k1] = FALLBACK_CODE_TABLE[k1]; }
+    for(var k2 in liveCodeTable){ merged[k2] = liveCodeTable[k2]; }
+    return merged;
+  }
+
+  function setCodesStatus(state, text){
+    codesSource = state;
+    var dot = document.getElementById("codesDot");
+    var label = document.getElementById("codesStatusText");
+    if(dot) dot.className = "codes-dot " + state;
+    if(label) label.textContent = text;
+  }
+
+  function refreshDisplayedCodes(){
+    // Si ya hay envíos cargados en pantalla, recalcula sus códigos con la tabla vigente.
+    if(typeof shipments !== "undefined" && shipments.length && typeof renderTruckList === "function"){
+      shipments.forEach(function(s){
+        var r = resolveCodigo(s.agenciaRaw, s.transportistaRaw);
+        s.codigo = r.codigo; s.codigoStatus = r.status; s.codigoExpiry = r.expiry || null;
+        s.agenciaCanonical = r.agenciaCanonical; s.transportistaCanonical = r.transportistaCanonical;
+      });
+      renderTruckList();
+    }
+  }
+
+  if(fbReady){
+    fbDb.collection("codigos_transporte").onSnapshot(function(snapshot){
+      var next = {};
+      snapshot.forEach(function(doc){
+        var d = doc.data();
+        if(d && d.agenciaKey && d.transportistaKey){
+          next[d.agenciaKey + "|" + d.transportistaKey] = [d.codigo, d.vencimiento || null];
+        }
+      });
+      liveCodeTable = next;
+      if(snapshot.size === 0){
+        setCodesStatus("fallback", "Usando valores de respaldo — aún no se ha guardado nada en Firestore");
+      } else {
+        setCodesStatus("live", "Códigos en vivo · " + snapshot.size + " combinaciones");
+      }
+      refreshDisplayedCodes();
+      if(typeof renderAdminGrid === "function") renderAdminGrid();
+    }, function(err){
+      console.error("Error al conectar con Firestore:", err);
+      setCodesStatus("error", "No se pudo conectar — usando valores de respaldo (" + err.message + ")");
+    });
+  } else {
+    setCodesStatus("error", "Firebase no disponible — usando valores de respaldo");
+  }
 
   // ---------- Helpers ----------
   function norm(s){
@@ -704,7 +862,7 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
         transportistaCanonical: tKey ? TRANSPORTISTA_ALIASES[tKey] : (transportistaRaw || "(sin dato)")
       };
     }
-    var entry = CODE_TABLE[aKey + "|" + tKey];
+    var entry = effectiveCodeTable()[aKey + "|" + tKey];
     if(!entry){
       return {
         codigo: "",
@@ -1604,6 +1762,121 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
   });
 
   el("btnBackToList").addEventListener("click", function(){ showScreen("screenList"); });
+
+  // ---------- Administración de códigos de transporte ----------
+  var ADMIN_AGENCIAS = ["cargonet","nexus","acostayaguayo","andes"];
+  var ADMIN_TRANSPORTISTAS = ["labbe","maryun","vasquez","berger","gla"];
+  var screenBeforeAdmin = "screenUpload";
+
+  var btnAdminToggle = el("btn-admin-toggle");
+  if(btnAdminToggle){
+    btnAdminToggle.addEventListener("click", function(){
+      var current = document.querySelector(".screen.active");
+      if(current && current.id !== "screenAdmin") screenBeforeAdmin = current.id;
+      showScreen("screenAdmin");
+    });
+  }
+  el("btnAdminBack").addEventListener("click", function(){ showScreen(screenBeforeAdmin); });
+
+  if(fbReady){
+    el("btnAdminLogin").addEventListener("click", function(){
+      var email = el("adminEmail").value.trim();
+      var pass = el("adminPassword").value;
+      el("adminLoginError").textContent = "";
+      fbAuth.signInWithEmailAndPassword(email, pass).catch(function(err){
+        el("adminLoginError").textContent = "No se pudo iniciar sesión: " + err.message;
+      });
+    });
+    el("btnAdminLogout").addEventListener("click", function(){ fbAuth.signOut(); });
+
+    fbAuth.onAuthStateChanged(function(user){
+      el("adminLogin").style.display = user ? "none" : "block";
+      el("adminPanel").style.display = user ? "block" : "none";
+      if(user) renderAdminGrid();
+    });
+  }
+
+  function renderAdminGrid(){
+    var textEl = el("codesStatusTextAdmin");
+    var dotEl = el("codesDotAdmin");
+    if(textEl) textEl.textContent = el("codesStatusText") ? el("codesStatusText").textContent : "";
+    if(dotEl) dotEl.className = "codes-dot " + codesSource;
+
+    var seedBlock = el("seedBlock");
+    if(seedBlock) seedBlock.style.display = (codesSource === "fallback" && Object.keys(liveCodeTable).length === 0) ? "block" : "none";
+
+    var grid = el("adminGrid");
+    if(!grid) return;
+    var table = effectiveCodeTable();
+    var html = "<div class='admin-header-row'>" +
+      "<div class='admin-header-cell'>Agencia de carga</div>" +
+      "<div class='admin-header-cell'>Transportista</div>" +
+      "<div class='admin-header-cell'>Código</div>" +
+      "<div class='admin-header-cell'>Vence (opcional)</div>" +
+      "<div></div></div>";
+    ADMIN_AGENCIAS.forEach(function(aKey){
+      ADMIN_TRANSPORTISTAS.forEach(function(tKey){
+        var entry = table[aKey + "|" + tKey] || ["", null];
+        var codigo = entry[0] || "";
+        var vencimiento = entry[1] || "";
+        html += "<div class='admin-row' data-akey='" + aKey + "' data-tkey='" + tKey + "'>" +
+          "<div>" + escapeHtml(AGENCIA_ALIASES[aKey]) + "</div>" +
+          "<div>" + escapeHtml(TRANSPORTISTA_ALIASES[tKey]) + "</div>" +
+          "<input data-field='codigo' value='" + escapeHtml(codigo) + "' placeholder='Ej: CS 12/2023 o SUSPENDIDA'>" +
+          "<input data-field='vencimiento' type='date' value='" + escapeHtml(vencimiento) + "'>" +
+          "<span class='admin-saved-flash' data-flash></span>" +
+          "</div>";
+      });
+    });
+    grid.innerHTML = html;
+
+    grid.querySelectorAll(".admin-row input").forEach(function(inp){
+      inp.addEventListener("change", function(){
+        var row = inp.closest(".admin-row");
+        var aKey = row.getAttribute("data-akey");
+        var tKey = row.getAttribute("data-tkey");
+        var codigoVal = row.querySelector("[data-field='codigo']").value.trim();
+        var vencVal = row.querySelector("[data-field='vencimiento']").value || null;
+        var flash = row.querySelector("[data-flash]");
+        fbDb.collection("codigos_transporte").doc(aKey + "_" + tKey).set({
+          agenciaKey: aKey,
+          transportistaKey: tKey,
+          agenciaNombre: AGENCIA_ALIASES[aKey],
+          transportistaNombre: TRANSPORTISTA_ALIASES[tKey],
+          codigo: codigoVal,
+          vencimiento: vencVal
+        }).then(function(){
+          if(flash){ flash.textContent = "Guardado ✓"; setTimeout(function(){ flash.textContent = ""; }, 2000); }
+        }).catch(function(err){
+          alert("Error al guardar: " + err.message);
+        });
+      });
+    });
+  }
+
+  if(fbReady){
+    el("btnSeedCodes").addEventListener("click", function(){
+      if(!confirm("¿Importar las 20 combinaciones actuales de respaldo como punto de partida en Firestore?")) return;
+      var batch = fbDb.batch();
+      ADMIN_AGENCIAS.forEach(function(aKey){
+        ADMIN_TRANSPORTISTAS.forEach(function(tKey){
+          var entry = FALLBACK_CODE_TABLE[aKey + "|" + tKey];
+          if(!entry) return;
+          var ref = fbDb.collection("codigos_transporte").doc(aKey + "_" + tKey);
+          batch.set(ref, {
+            agenciaKey: aKey, transportistaKey: tKey,
+            agenciaNombre: AGENCIA_ALIASES[aKey], transportistaNombre: TRANSPORTISTA_ALIASES[tKey],
+            codigo: entry[0], vencimiento: entry[1] || null
+          });
+        });
+      });
+      batch.commit().then(function(){
+        alert("Datos importados correctamente.");
+      }).catch(function(err){
+        alert("Error al importar: " + err.message);
+      });
+    });
+  }
 
   // ---------- Log screen ----------
   function renderLog(){
