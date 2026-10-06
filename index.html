@@ -804,15 +804,25 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
     if(label) label.textContent = text;
   }
 
+  function applyResolvedCode(s){
+    var r = resolveCodigo(s.agenciaRaw, s.transportistaRaw);
+    s.codigo = r.codigo; s.codigoStatus = r.status; s.codigoExpiry = r.expiry || null;
+    s.agenciaCanonical = r.agenciaCanonical; s.transportistaCanonical = r.transportistaCanonical;
+  }
+
   function refreshDisplayedCodes(){
-    // Si ya hay envíos cargados en pantalla, recalcula sus códigos con la tabla vigente.
-    if(typeof shipments !== "undefined" && shipments.length && typeof renderTruckList === "function"){
-      shipments.forEach(function(s){
-        var r = resolveCodigo(s.agenciaRaw, s.transportistaRaw);
-        s.codigo = r.codigo; s.codigoStatus = r.status; s.codigoExpiry = r.expiry || null;
-        s.agenciaCanonical = r.agenciaCanonical; s.transportistaCanonical = r.transportistaCanonical;
-      });
-      renderTruckList();
+    // Recalcula con la tabla vigente los envíos PENDIENTES (no los ya despachados ni los con código manual).
+    if(typeof shipments === "undefined" || !shipments.length) return;
+    var changed = false;
+    shipments.forEach(function(s){
+      if(s.status === "despachado" || s.codigoStatus === "manual") return;
+      var before = s.codigo + "|" + s.codigoStatus;
+      applyResolvedCode(s);
+      if(before !== s.codigo + "|" + s.codigoStatus) changed = true;
+    });
+    if(changed){
+      if(typeof saveCurrentDay === "function") saveCurrentDay();
+      if(typeof renderList === "function") renderList();
     }
   }
 
@@ -939,18 +949,22 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
     var h12 = h % 12; if(h12===0) h12=12;
     return h12+":"+m+":"+s+" "+ampm;
   }
-  function addOneHour(fechaISO, hhmmss){
-    // fechaISO: "yyyy-mm-dd", hhmmss: "HH:MM:SS" (24h) — devuelve {fecha, hora} un tramo después,
-    // ajustando la fecha si la hora cruza medianoche.
+  function addHours(fechaISO, hhmmss, n){
+    // fechaISO: "yyyy-mm-dd", hhmmss: "HH:MM:SS" (24h) — desplaza n horas (puede ser negativo),
+    // ajustando la fecha si cruza medianoche.
     if(!fechaISO || !hhmmss) return {fecha: fechaISO, hora: hhmmss};
     var dparts = fechaISO.split("-").map(Number);
     var tparts = hhmmss.split(":").map(Number);
     var d = new Date(dparts[0], dparts[1]-1, dparts[2], tparts[0]||0, tparts[1]||0, tparts[2]||0);
-    d.setHours(d.getHours()+1);
+    d.setHours(d.getHours()+n);
     var fecha2 = d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate());
     var hora2 = pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());
     return {fecha: fecha2, hora: hora2};
   }
+  // s.fecha / s.hora = hora REAL del despacho = "Estatus de seguridad expedido el".
+  // La firma se declara 1 hora ANTES (la expedición ocurre 1 hora después de firmar).
+  function firmaDe(s){ return addHours(s.fecha, s.hora, -1); }
+  function addOneHour(fechaISO, hhmmss){ return addHours(fechaISO, hhmmss, 1); }
   function cellStr(v){
     if(v===null || v===undefined) return "";
     return String(v).trim();
@@ -1495,9 +1509,25 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
     }
     errBox.style.display = "none";
 
+    // Revalida con la tabla de códigos vigente antes de emitir
+    var blocked = [];
+    currentBatchIdxs.forEach(function(idx){
+      var sh = shipments[idx];
+      if(sh.codigoStatus === "manual") return;
+      applyResolvedCode(sh);
+      if(sh.codigoStatus !== "ok") blocked.push(sh.pv + " (" + (sh.codigo || "sin código") + ")");
+    });
+    if(blocked.length){
+      errBox.textContent = "No se puede emitir: el código vigente de estos envíos no es válido → " + blocked.join(", ");
+      errBox.style.display = "block";
+      saveCurrentDay(); renderList();
+      return;
+    }
+
     var declared = [];
     currentBatchIdxs.forEach(function(idx){
       var s = shipments[idx];
+      if(s.codigoStatus !== "manual") applyResolvedCode(s); // usa siempre la tabla vigente al emitir
       s.status = "despachado";
       s.despachador = nombre;
       s.rut = rut;
@@ -1637,7 +1667,7 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
   }
 
   function buildSummaryCard(s){
-    var expedicion = addOneHour(s.fecha, s.hora);
+    var firma = firmaDe(s);
     return "<div class='summary-card'>"+
       "<div class='summary-card-head'>"+
         "<div class='summary-pv'>PV "+escapeHtml(s.pv)+"</div>"+
@@ -1649,8 +1679,8 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
         summaryRow("Agente de carga", s.agenciaCanonical)+
         summaryRow("Transportista", s.transportistaCanonical)+
         summaryRow("Despachador", (s.despachador||"")+" "+(s.rut||""))+
-        summaryRow("Fecha y hora de firma", fmtDateCL(s.fecha)+"  "+fmtTime12(s.hora))+
-        summaryRow("Fecha y hora de expedición", fmtDateCL(expedicion.fecha)+"  "+fmtTime12(expedicion.hora))+
+        summaryRow("Fecha y hora de firma", fmtDateCL(firma.fecha)+"  "+fmtTime12(firma.hora))+
+        summaryRow("Fecha y hora de expedición (hora real)", fmtDateCL(s.fecha)+"  "+fmtTime12(s.hora))+
       "</div>"+
     "</div>";
   }
@@ -1684,17 +1714,17 @@ var DOCX_TEMPLATE_B64 = "UEsDBAoAAAAAAICmKl0AAAAAAAAAAAAAAAAFAAAAd29yZC9QSwMEFAA
     return arr;
   }
   function fillDocxXml(xml, s){
-    var expedicion = addOneHour(s.fecha, s.hora);
+    var firma = firmaDe(s);
     var map = {
       CODIG_TRANSPORTE: s.codigo,
       PV: s.pv,
       DESTINO: s.destino,
       NOMBRE_DESPACHADOR: s.despachador,
       RUT_DESPACHADOR: s.rut,
-      FECHA_EXPEDICION: fmtDateCL(expedicion.fecha),
-      HORA_DEPACHO: fmtTime12(expedicion.hora),
-      FECHA_FIRMA: fmtDateCL(s.fecha),
-      HORA_EXPEDICION: fmtTime12(s.hora)
+      FECHA_EXPEDICION: fmtDateCL(s.fecha),
+      HORA_DEPACHO: fmtTime12(s.hora),
+      FECHA_FIRMA: fmtDateCL(firma.fecha),
+      HORA_EXPEDICION: fmtTime12(firma.hora)
     };
     var out = xml;
     Object.keys(map).forEach(function(key){
